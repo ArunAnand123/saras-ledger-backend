@@ -45,7 +45,15 @@ async function computeAccountClosingBalance(conn, accountId, ledgerId) {
   const [transfersOut] = await conn.query('SELECT COALESCE(SUM(amount),0) AS total FROM transfers WHERE from_account_id = ? AND ledger_id = ?', [accountId, ledgerId]);
   const [transfersIn] = await conn.query('SELECT COALESCE(SUM(amount),0) AS total FROM transfers WHERE to_account_id = ? AND ledger_id = ?', [accountId, ledgerId]);
 
-  const opening = Number(account[0].opening_balance) || 0;
+  // opening_balance is only added if there's no "opening balance" transaction already representing it
+  // within THIS ledger - otherwise it would be double-counted (once as the raw column, once as income).
+  // A fresh manually-entered opening balance always creates such a transaction; a carried-forward
+  // balance from a previous ledger does not, so it needs to be added directly here instead.
+  const [openingTxn] = await conn.query(
+    'SELECT id FROM transactions WHERE account_id = ? AND ledger_id = ? AND is_opening_balance = TRUE LIMIT 1',
+    [accountId, ledgerId]
+  );
+  const opening = openingTxn.length > 0 ? 0 : (Number(account[0].opening_balance) || 0);
   const income = Number(txns[0].income) || 0;
   const expense = Number(txns[0].expense) || 0;
   return opening + income - expense + Number(transfersIn[0].total) - Number(transfersOut[0].total);

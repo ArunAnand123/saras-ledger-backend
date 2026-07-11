@@ -38,7 +38,7 @@ router.post('/register', async (req, res) => {
       ['Salary', 'income', 'ti-briefcase'],
       ['Business', 'income', 'ti-building-store'],
       ['Investment', 'income', 'ti-trending-up'],
-      ['Freelance', 'income', 'ti-laptop'],
+      ['Freelance', 'income', 'ti-wallet'],
       ['Other Income', 'income', 'ti-dots'],
       ['Groceries', 'expense', 'ti-shopping-cart'],
       ['Rent', 'expense', 'ti-home'],

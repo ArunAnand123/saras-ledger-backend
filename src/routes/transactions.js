@@ -35,6 +35,13 @@ router.get('/', async (req, res) => {
 });
 
 // POST /api/transactions - create a new income/expense entry
+function normalizeForMonth(forMonth) {
+  if (!forMonth) return null;
+  // The frontend sends YYYY-MM (from an HTML month input), but the database
+  // column is a proper DATE, which requires a full YYYY-MM-DD value.
+  return /^\d{4}-\d{2}$/.test(forMonth) ? `${forMonth}-01` : forMonth;
+}
+
 // Mirrors validateAndSave(kind) for kind='income'/'expense'
 router.post('/', async (req, res) => {
   const { accountId, category, subcategory, type, amount, date, forMonth, notes } = req.body;
@@ -50,7 +57,7 @@ router.post('/', async (req, res) => {
     const [result] = await pool.query(
       `INSERT INTO transactions (ledger_id, account_id, category, subcategory, type, amount, txn_date, for_month, notes)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [req.ledgerId, accountId, category, subcategory || null, type, amount, date, forMonth || null, notes || null]
+      [req.ledgerId, accountId, category, subcategory || null, type, amount, date, normalizeForMonth(forMonth), notes || null]
     );
     res.status(201).json({ id: result.insertId });
   } catch (err) {
@@ -79,7 +86,7 @@ router.put('/:id', async (req, res) => {
     await pool.query(
       `UPDATE transactions SET account_id=?, category=?, subcategory=?, amount=?, txn_date=?, for_month=?, notes=?
        WHERE id = ? AND ledger_id = ?`,
-      [accountId, category, subcategory || null, amount, date, forMonth || null, notes || null, req.params.id, req.ledgerId]
+      [accountId, category, subcategory || null, amount, date, normalizeForMonth(forMonth), notes || null, req.params.id, req.ledgerId]
     );
     res.json({ success: true });
   } catch (err) {

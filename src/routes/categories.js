@@ -11,6 +11,8 @@ const DEFAULT_CATEGORIES = [
   ['Business', 'income', 'ti-building-store'],
   ['Investment', 'income', 'ti-trending-up'],
   ['Freelance', 'income', 'ti-wallet'],
+  ['Rental Income', 'income', 'ti-home'],
+  ['Gift/Refund', 'income', 'ti-gift'],
   ['Other Income', 'income', 'ti-dots'],
   ['Groceries', 'expense', 'ti-shopping-cart'],
   ['Rent', 'expense', 'ti-home'],
@@ -18,17 +20,26 @@ const DEFAULT_CATEGORIES = [
   ['Utilities', 'expense', 'ti-bolt'],
   ['Medical', 'expense', 'ti-heart-rate-monitor'],
   ['Shopping', 'expense', 'ti-shopping-bag'],
-  ['Dining', 'expense', 'ti-tools-kitchen-2']
+  ['Dining', 'expense', 'ti-tools-kitchen-2'],
+  ['EMI/Loan Payment', 'expense', 'ti-credit-card'],
+  ['Insurance', 'expense', 'ti-shield'],
+  ['Education', 'expense', 'ti-book'],
+  ['Entertainment', 'expense', 'ti-device-tv'],
+  ['Mobile & Internet', 'expense', 'ti-device-mobile'],
+  ['Personal Care', 'expense', 'ti-scissors']
 ];
 
 router.get('/', async (req, res) => {
   const { type } = req.query;
   try {
-    const [countRows] = await pool.query('SELECT COUNT(*) AS cnt FROM categories WHERE user_id = ?', [req.userId]);
-    if (countRows[0].cnt === 0) {
-      // This account predates the default-category seeding fix - seed it now, one time only,
-      // so existing accounts self-heal instead of staying permanently empty.
-      const values = DEFAULT_CATEGORIES.map(([name, catType, icon]) => [req.userId, name, catType, icon]);
+    // Top-up: insert only the default categories the account doesn't already have by name.
+    // Covers both a brand-new account (has none of them) and an older account that already
+    // has some defaults but predates a later addition to the default list (like this batch).
+    const [existingRows] = await pool.query('SELECT name FROM categories WHERE user_id = ?', [req.userId]);
+    const existingNames = new Set(existingRows.map(r => r.name));
+    const missing = DEFAULT_CATEGORIES.filter(([name]) => !existingNames.has(name));
+    if (missing.length > 0) {
+      const values = missing.map(([name, catType, icon]) => [req.userId, name, catType, icon]);
       await pool.query('INSERT INTO categories (user_id, name, type, icon) VALUES ?', [values]);
     }
 

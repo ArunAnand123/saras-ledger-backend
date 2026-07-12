@@ -39,6 +39,8 @@ router.post('/register', async (req, res) => {
       ['Business', 'income', 'ti-building-store'],
       ['Investment', 'income', 'ti-trending-up'],
       ['Freelance', 'income', 'ti-wallet'],
+      ['Rental Income', 'income', 'ti-home'],
+      ['Gift/Refund', 'income', 'ti-gift'],
       ['Other Income', 'income', 'ti-dots'],
       ['Groceries', 'expense', 'ti-shopping-cart'],
       ['Rent', 'expense', 'ti-home'],
@@ -46,7 +48,13 @@ router.post('/register', async (req, res) => {
       ['Utilities', 'expense', 'ti-bolt'],
       ['Medical', 'expense', 'ti-heart-rate-monitor'],
       ['Shopping', 'expense', 'ti-shopping-bag'],
-      ['Dining', 'expense', 'ti-tools-kitchen-2']
+      ['Dining', 'expense', 'ti-tools-kitchen-2'],
+      ['EMI/Loan Payment', 'expense', 'ti-credit-card'],
+      ['Insurance', 'expense', 'ti-shield'],
+      ['Education', 'expense', 'ti-book'],
+      ['Entertainment', 'expense', 'ti-device-tv'],
+      ['Mobile & Internet', 'expense', 'ti-device-mobile'],
+      ['Personal Care', 'expense', 'ti-scissors']
     ];
     const categoryValues = defaultCategories.map(([name, type, icon]) => [userId, name, type, icon]);
     await pool.query(

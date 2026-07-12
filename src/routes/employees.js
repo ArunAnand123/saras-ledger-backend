@@ -127,4 +127,41 @@ router.delete('/:employeeId/history/:historyId', async (req, res) => {
   }
 });
 
+// GET /api/employees/:id/banks - list this employee's saved bank names (for record-keeping,
+// distinct from the payer's own bank accounts)
+router.get('/:id/banks', async (req, res) => {
+  try {
+    const [employee] = await pool.query('SELECT id FROM employees WHERE id = ? AND user_id = ?', [req.params.id, req.userId]);
+    if (employee.length === 0) return res.status(404).json({ error: 'Employee not found.' });
+
+    const [banks] = await pool.query(
+      'SELECT id, bank_name FROM employee_bank_accounts WHERE employee_id = ? ORDER BY bank_name ASC',
+      [req.params.id]
+    );
+    res.json(banks);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Could not load employee bank accounts.' });
+  }
+});
+
+// POST /api/employees/:id/banks - add a new saved bank name for this employee
+router.post('/:id/banks', async (req, res) => {
+  const { bankName } = req.body;
+  if (!bankName || !bankName.trim()) return res.status(400).json({ error: 'Bank name is required.' });
+  try {
+    const [employee] = await pool.query('SELECT id FROM employees WHERE id = ? AND user_id = ?', [req.params.id, req.userId]);
+    if (employee.length === 0) return res.status(404).json({ error: 'Employee not found.' });
+
+    const [result] = await pool.query(
+      'INSERT INTO employee_bank_accounts (employee_id, bank_name) VALUES (?, ?)',
+      [req.params.id, bankName.trim()]
+    );
+    res.status(201).json({ id: result.insertId, bank_name: bankName.trim() });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Could not save employee bank account.' });
+  }
+});
+
 module.exports = router;

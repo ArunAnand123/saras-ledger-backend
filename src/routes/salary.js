@@ -10,7 +10,7 @@ function monthIndex(year, month) { return year * 12 + month; } // month is 0-ind
 // POST /api/employees/:id/salary - mirrors computeSalary() + recordSalaryHistory() combined,
 // re-validated fully server-side since this is real money math, never trust the client alone.
 router.post('/:id/salary', async (req, res) => {
-  const { amount, forMonth, lopDates, advances, payMethod, accountId, txnDate, notes } = req.body;
+  const { amount, forMonth, lopDates, advances, payMethod, accountId, txnDate, notes, employeeBankName } = req.body;
   const employeeId = req.params.id;
 
   if (!amount || amount <= 0) return res.status(400).json({ error: 'Amount is required and must be greater than zero.' });
@@ -94,9 +94,9 @@ router.post('/:id/salary', async (req, res) => {
       const linkedTransactionId = txnResult.insertId;
 
       const [historyResult] = await conn.query(
-        `INSERT INTO salary_history (employee_id, ledger_id, for_month, prorated_amount, lop_days, total_advance, net_payable, linked_transaction_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [employeeId, req.ledgerId, `${forMonth}-01`, prorated, lopDays, totalAdvance, netPayable, linkedTransactionId]
+        `INSERT INTO salary_history (employee_id, ledger_id, for_month, prorated_amount, lop_days, total_advance, net_payable, linked_transaction_id, employee_bank_name)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [employeeId, req.ledgerId, `${forMonth}-01`, prorated, lopDays, totalAdvance, netPayable, linkedTransactionId, payMethod==='bank' ? (employeeBankName||null) : null]
       );
       const historyId = historyResult.insertId;
 

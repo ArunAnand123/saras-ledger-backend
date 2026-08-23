@@ -79,7 +79,11 @@ router.post('/full', async (req, res) => {
     const accountMap = {};
     existingAccounts.forEach(a => { accountMap[a.name.toLowerCase()] = a.id; });
     for (const acct of bankAccounts) {
-      await ensureAccount(conn, req.userId, accountMap, acct.name, acct.isCash, acct.openingBalance, true);
+      // Never overwrite an EXISTING account's opening balance - accounts are shared across
+      // ledgers, so an account matched by name here could be one you've used for weeks with
+      // its own real history. Only a genuinely new account (one that doesn't exist yet) gets
+      // its opening balance set from the backup.
+      await ensureAccount(conn, req.userId, accountMap, acct.name, acct.isCash, acct.openingBalance, false);
     }
 
     const [existingCategories] = await conn.query('SELECT * FROM categories WHERE user_id = ?', [req.userId]);

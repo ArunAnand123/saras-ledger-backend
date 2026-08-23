@@ -10,7 +10,7 @@ function monthIndex(year, month) { return year * 12 + month; } // month is 0-ind
 // POST /api/employees/:id/salary - mirrors computeSalary() + recordSalaryHistory() combined,
 // re-validated fully server-side since this is real money math, never trust the client alone.
 router.post('/:id/salary', async (req, res) => {
-  const { amount, forMonth, lopDates, advances, payMethod, accountId, txnDate, notes, employeeBankName } = req.body;
+  const { amount, forMonth, lopDays: lopDaysInput, lopDates, advances, payMethod, accountId, txnDate, notes, employeeBankName } = req.body;
   const employeeId = req.params.id;
 
   if (!amount || amount <= 0) return res.status(400).json({ error: 'Amount is required and must be greater than zero.' });
@@ -47,17 +47,26 @@ router.post('/:id/salary', async (req, res) => {
     if (daysWorked < 0) daysWorked = 0;
     if (daysWorked > 30) daysWorked = 30;
 
-    // Validate LOP dates: each must fall within forMonth, no duplicates
-    const lopList = Array.isArray(lopDates) ? lopDates : [];
-    const uniqueLopDates = new Set();
-    for (const d of lopList) {
-      const dt = new Date(d);
-      if (monthIndex(dt.getFullYear(), dt.getMonth()) !== targetIdx) {
-        return res.status(400).json({ error: `Absence date ${d} is outside the selected "For month".` });
+    // Prefer a direct LOP day count if given (simpler input); fall back to counting a list
+    // of specific dates for backward compatibility with the older absence-picker approach.
+    // uniqueLopDates only gets populated in the fallback path - stays empty (and the later
+    // salary_lop_dates insert loop correctly no-ops) when using the simpler direct count.
+    let lopDays;
+    let uniqueLopDates = new Set();
+    if (lopDaysInput !== undefined && lopDaysInput !== null && lopDaysInput !== '') {
+      lopDays = parseInt(lopDaysInput, 10);
+      if (isNaN(lopDays) || lopDays < 0) lopDays = 0;
+    } else {
+      const lopList = Array.isArray(lopDates) ? lopDates : [];
+      for (const d of lopList) {
+        const dt = new Date(d);
+        if (monthIndex(dt.getFullYear(), dt.getMonth()) !== targetIdx) {
+          return res.status(400).json({ error: `Absence date ${d} is outside the selected "For month".` });
+        }
+        uniqueLopDates.add(d);
       }
-      uniqueLopDates.add(d);
+      lopDays = uniqueLopDates.size;
     }
-    const lopDays = uniqueLopDates.size;
 
     if (lopDays > daysWorked) {
       return res.status(400).json({ error: `LOP (${lopDays} days) cannot exceed the ${daysWorked} day(s) worked this month.` });

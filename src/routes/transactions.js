@@ -44,7 +44,7 @@ function normalizeForMonth(forMonth) {
 
 // Mirrors validateAndSave(kind) for kind='income'/'expense'
 router.post('/', async (req, res) => {
-  const { accountId, category, subcategory, type, amount, date, forMonth, notes } = req.body;
+  const { accountId, category, subcategory, type, amount, date, forMonth, notes, billPhoto, createdAt } = req.body;
 
   if (!amount || amount <= 0) {
     return res.status(400).json({ error: 'Amount is required and must be greater than zero.' });
@@ -55,9 +55,14 @@ router.post('/', async (req, res) => {
 
   try {
     const [result] = await pool.query(
-      `INSERT INTO transactions (ledger_id, account_id, category, subcategory, type, amount, txn_date, for_month, notes)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [req.ledgerId, accountId, category, subcategory || null, type, amount, date, normalizeForMonth(forMonth), notes || null]
+      createdAt
+        ? `INSERT INTO transactions (ledger_id, account_id, category, subcategory, type, amount, txn_date, for_month, notes, bill_photo_url, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        : `INSERT INTO transactions (ledger_id, account_id, category, subcategory, type, amount, txn_date, for_month, notes, bill_photo_url)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      createdAt
+        ? [req.ledgerId, accountId, category, subcategory || null, type, amount, date, normalizeForMonth(forMonth), notes || null, billPhoto || null, createdAt]
+        : [req.ledgerId, accountId, category, subcategory || null, type, amount, date, normalizeForMonth(forMonth), notes || null, billPhoto || null]
     );
     res.status(201).json({ id: result.insertId });
   } catch (err) {
@@ -69,7 +74,7 @@ router.post('/', async (req, res) => {
 // PUT /api/transactions/:id - edit an existing entry
 // Mirrors editIncomeExpense() + the edit-mode branch of validateAndSave()
 router.put('/:id', async (req, res) => {
-  const { accountId, category, subcategory, amount, date, forMonth, notes } = req.body;
+  const { accountId, category, subcategory, amount, date, forMonth, notes, billPhoto, createdAt } = req.body;
 
   if (!amount || amount <= 0) {
     return res.status(400).json({ error: 'Amount is required and must be greater than zero.' });
@@ -77,16 +82,19 @@ router.put('/:id', async (req, res) => {
 
   try {
     const [existing] = await pool.query(
-      'SELECT id FROM transactions WHERE id = ? AND ledger_id = ?',
+      'SELECT id, bill_photo_url, created_at FROM transactions WHERE id = ? AND ledger_id = ?',
       [req.params.id, req.ledgerId]
     );
     if (existing.length === 0) {
       return res.status(404).json({ error: 'Transaction not found.' });
     }
+    // If no new photo/time was sent, keep whatever was already saved rather than wiping it out.
+    const photoToSave = billPhoto !== undefined ? billPhoto : existing[0].bill_photo_url;
+    const createdAtToSave = createdAt || existing[0].created_at;
     await pool.query(
-      `UPDATE transactions SET account_id=?, category=?, subcategory=?, amount=?, txn_date=?, for_month=?, notes=?
+      `UPDATE transactions SET account_id=?, category=?, subcategory=?, amount=?, txn_date=?, for_month=?, notes=?, bill_photo_url=?, created_at=?
        WHERE id = ? AND ledger_id = ?`,
-      [accountId, category, subcategory || null, amount, date, normalizeForMonth(forMonth), notes || null, req.params.id, req.ledgerId]
+      [accountId, category, subcategory || null, amount, date, normalizeForMonth(forMonth), notes || null, photoToSave, createdAtToSave, req.params.id, req.ledgerId]
     );
     res.json({ success: true });
   } catch (err) {

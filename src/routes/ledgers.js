@@ -18,14 +18,25 @@ router.get('/current', async (req, res) => {
   }
 });
 
-// GET /api/ledgers - past ledgers archive (mirrors renderPastLedgers())
+// GET /api/ledgers - past ledgers archive (mirrors renderPastLedgers()), including each
+// ledger's still-pending loan count/total, so the user can decide which ones to sweep in.
 router.get('/', async (req, res) => {
   try {
     const [ledgers] = await pool.query(
       'SELECT * FROM ledgers WHERE user_id = ? ORDER BY created_at DESC',
       [req.userId]
     );
-    res.json(ledgers);
+    const withPending = await Promise.all(ledgers.map(async (led) => {
+      const [loans] = await pool.query('SELECT * FROM loans WHERE ledger_id = ?', [led.id]);
+      let pendingCount = 0, pendingTotal = 0;
+      for (const loan of loans) {
+        const [repayments] = await pool.query('SELECT COALESCE(SUM(amount),0) AS total FROM loan_repayments WHERE loan_id = ?', [loan.id]);
+        const pending = Number(loan.amount) - Number(repayments[0].total);
+        if (pending > 0) { pendingCount++; pendingTotal += pending; }
+      }
+      return { ...led, pending_loan_count: pendingCount, pending_loan_total: pendingTotal };
+    }));
+    res.json(withPending);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Could not load ledgers.' });
@@ -64,10 +75,11 @@ async function computeAccountClosingBalance(conn, accountId, ledgerId) {
 //   Employees (record itself)                              : YES (untouched, tied to user_id)
 //   Categories                                              : YES (untouched, tied to user_id)
 //   Bank accounts (the accounts themselves)                 : YES (untouched, tied to user_id)
-//   Pending loans                                            : YES (moved to new ledger_id)
+//   Pending loans (from the ledger being closed)            : YES (moved to new ledger_id, automatic)
+//   Pending loans from OTHER, older past ledgers            : only if explicitly selected via sourceLedgerIds
 //   Settled loans, Transactions, Transfers, Salary history  : NO  (archived, new ledger starts clean)
 router.post('/', async (req, res) => {
-  const { name } = req.body;
+  const { name, sourceLedgerIds } = req.body;
   if (!name) return res.status(400).json({ error: 'Please name your new ledger.' });
 
   const conn = await pool.getConnection();
@@ -110,12 +122,28 @@ router.post('/', async (req, res) => {
     }
 
     // Carry forward: only pending loans move to the new ledger; settled ones stay archived in the old one
-    const [loans] = await conn.query('SELECT * FROM loans WHERE user_id = ? AND ledger_id = ?', [req.userId, oldLedger.id]);
-    for (const loan of loans) {
-      const [repayments] = await conn.query('SELECT COALESCE(SUM(amount),0) AS total FROM loan_repayments WHERE loan_id = ?', [loan.id]);
-      const pending = Number(loan.amount) - Number(repayments[0].total);
-      if (pending > 0) {
-        await conn.query('UPDATE loans SET ledger_id = ? WHERE id = ?', [newLedgerId, loan.id]);
+    let sweptLoanCount = 0;
+    async function sweepPendingLoans(fromLedgerId) {
+      const [loans] = await conn.query('SELECT * FROM loans WHERE user_id = ? AND ledger_id = ?', [req.userId, fromLedgerId]);
+      for (const loan of loans) {
+        const [repayments] = await conn.query('SELECT COALESCE(SUM(amount),0) AS total FROM loan_repayments WHERE loan_id = ?', [loan.id]);
+        const pending = Number(loan.amount) - Number(repayments[0].total);
+        if (pending > 0) {
+          await conn.query('UPDATE loans SET ledger_id = ? WHERE id = ?', [newLedgerId, loan.id]);
+          sweptLoanCount++;
+        }
+      }
+    }
+    await sweepPendingLoans(oldLedger.id);
+
+    // Additionally, sweep in pending loans from any explicitly-selected OLDER past ledgers -
+    // these wouldn't move automatically otherwise, since only the ledger being closed does.
+    if (Array.isArray(sourceLedgerIds)) {
+      for (const srcId of sourceLedgerIds) {
+        if (Number(srcId) === oldLedger.id) continue; // already handled above
+        const [ownedCheck] = await conn.query('SELECT id FROM ledgers WHERE id = ? AND user_id = ?', [srcId, req.userId]);
+        if (ownedCheck.length === 0) continue; // ignore anything not actually owned by this user
+        await sweepPendingLoans(srcId);
       }
     }
 
@@ -127,6 +155,7 @@ router.post('/', async (req, res) => {
     res.status(201).json({
       newLedgerId,
       token,
+      sweptLoanCount,
       closedLedger: { id: oldLedger.id, name: oldLedger.name, closingBank, closingCash }
     });
   } catch (err) {

@@ -25,14 +25,18 @@ router.get('/', async (req, res) => {
 
 // POST /api/transfers - mirrors validateAndSaveTransfer() create path
 router.post('/', async (req, res) => {
-  const { fromAccountId, toAccountId, amount, date, notes } = req.body;
+  const { fromAccountId, toAccountId, amount, date, notes, createdAt } = req.body;
   if (!amount || amount <= 0) return res.status(400).json({ error: 'Amount is required and must be greater than zero.' });
   if (!fromAccountId || !toAccountId || !date) return res.status(400).json({ error: 'From account, To account, and date are all required.' });
 
   try {
     const [result] = await pool.query(
-      'INSERT INTO transfers (ledger_id, from_account_id, to_account_id, amount, txn_date, notes) VALUES (?, ?, ?, ?, ?, ?)',
-      [req.ledgerId, fromAccountId, toAccountId, amount, date, notes || null]
+      createdAt
+        ? 'INSERT INTO transfers (ledger_id, from_account_id, to_account_id, amount, txn_date, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+        : 'INSERT INTO transfers (ledger_id, from_account_id, to_account_id, amount, txn_date, notes) VALUES (?, ?, ?, ?, ?, ?)',
+      createdAt
+        ? [req.ledgerId, fromAccountId, toAccountId, amount, date, notes || null, createdAt]
+        : [req.ledgerId, fromAccountId, toAccountId, amount, date, notes || null]
     );
     res.status(201).json({ id: result.insertId });
   } catch (err) {
@@ -43,16 +47,17 @@ router.post('/', async (req, res) => {
 
 // PUT /api/transfers/:id - mirrors editTransfer() + validateAndSaveTransfer() edit path
 router.put('/:id', async (req, res) => {
-  const { fromAccountId, toAccountId, amount, date, notes } = req.body;
+  const { fromAccountId, toAccountId, amount, date, notes, createdAt } = req.body;
   if (!amount || amount <= 0) return res.status(400).json({ error: 'Amount is required and must be greater than zero.' });
 
   try {
-    const [existing] = await pool.query('SELECT id FROM transfers WHERE id = ? AND ledger_id = ?', [req.params.id, req.ledgerId]);
+    const [existing] = await pool.query('SELECT id, created_at FROM transfers WHERE id = ? AND ledger_id = ?', [req.params.id, req.ledgerId]);
     if (existing.length === 0) return res.status(404).json({ error: 'Transfer not found.' });
 
+    const createdAtToSave = createdAt || existing[0].created_at;
     await pool.query(
-      'UPDATE transfers SET from_account_id=?, to_account_id=?, amount=?, txn_date=?, notes=? WHERE id=? AND ledger_id=?',
-      [fromAccountId, toAccountId, amount, date, notes || null, req.params.id, req.ledgerId]
+      'UPDATE transfers SET from_account_id=?, to_account_id=?, amount=?, txn_date=?, notes=?, created_at=? WHERE id=? AND ledger_id=?',
+      [fromAccountId, toAccountId, amount, date, notes || null, createdAtToSave, req.params.id, req.ledgerId]
     );
     res.json({ success: true });
   } catch (err) {

@@ -32,17 +32,6 @@ const DEFAULT_CATEGORIES = [
 router.get('/', async (req, res) => {
   const { type } = req.query;
   try {
-    // Top-up: insert only the default categories the account doesn't already have by name.
-    // Covers both a brand-new account (has none of them) and an older account that already
-    // has some defaults but predates a later addition to the default list (like this batch).
-    const [existingRows] = await pool.query('SELECT name FROM categories WHERE user_id = ?', [req.userId]);
-    const existingNames = new Set(existingRows.map(r => r.name));
-    const missing = DEFAULT_CATEGORIES.filter(([name]) => !existingNames.has(name));
-    if (missing.length > 0) {
-      const values = missing.map(([name, catType, icon]) => [req.userId, name, catType, icon]);
-      await pool.query('INSERT INTO categories (user_id, name, type, icon) VALUES ?', [values]);
-    }
-
     let sql = 'SELECT * FROM categories WHERE user_id = ?';
     const params = [req.userId];
     if (type) { sql += ' AND type = ?'; params.push(type); }
@@ -68,6 +57,56 @@ router.post('/', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Could not create category.' });
+  }
+});
+
+// PUT /api/categories/:id - rename a category. Note: transactions store the category name as
+// a plain text snapshot at the time they were created, not a live reference, so renaming here
+// does not retroactively change past transactions - only future selections from the picker.
+router.put('/:id', async (req, res) => {
+  const { name } = req.body;
+  if (!name || !name.trim()) return res.status(400).json({ error: 'Name is required.' });
+  try {
+    const [existing] = await pool.query('SELECT id FROM categories WHERE id = ? AND user_id = ?', [req.params.id, req.userId]);
+    if (existing.length === 0) return res.status(404).json({ error: 'Category not found.' });
+    await pool.query('UPDATE categories SET name = ? WHERE id = ? AND user_id = ?', [name.trim(), req.params.id, req.userId]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Could not rename category.' });
+  }
+});
+
+// DELETE /api/categories/:id - removes it from the picker going forward. Past transactions
+// keep their category name as-is (stored as text, not a reference), so this is always safe.
+router.delete('/:id', async (req, res) => {
+  try {
+    const [existing] = await pool.query('SELECT id FROM categories WHERE id = ? AND user_id = ?', [req.params.id, req.userId]);
+    if (existing.length === 0) return res.status(404).json({ error: 'Category not found.' });
+    await pool.query('DELETE FROM categories WHERE id = ? AND user_id = ?', [req.params.id, req.userId]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Could not delete category.' });
+  }
+});
+
+// POST /api/categories/restore-defaults - explicitly re-adds any of the standard default
+// categories that are currently missing (for either type), without touching or duplicating
+// anything the user already has. Useful if defaults are missing for any reason.
+router.post('/restore-defaults', async (req, res) => {
+  try {
+    const [existing] = await pool.query('SELECT name, type FROM categories WHERE user_id = ?', [req.userId]);
+    const existingKeys = new Set(existing.map(c => c.name.toLowerCase() + '|' + c.type));
+    const missing = DEFAULT_CATEGORIES.filter(([name, type]) => !existingKeys.has(name.toLowerCase() + '|' + type));
+    if (missing.length > 0) {
+      const values = missing.map(([name, type, icon]) => [req.userId, name, type, icon]);
+      await pool.query('INSERT INTO categories (user_id, name, type, icon) VALUES ?', [values]);
+    }
+    res.json({ restoredCount: missing.length, restored: missing.map(m => m[0]) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Could not restore default categories.' });
   }
 });
 

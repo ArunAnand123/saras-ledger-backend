@@ -31,9 +31,19 @@ router.get('/', async (req, res) => {
 // GET /api/loans/:id - single loan with its repayment history
 router.get('/:id', async (req, res) => {
   try {
-    const [loans] = await pool.query('SELECT * FROM loans WHERE id = ? AND user_id = ?', [req.params.id, req.userId]);
+    const [loans] = await pool.query(
+      `SELECT l.*, a.name AS account_name FROM loans l
+       LEFT JOIN bank_accounts a ON a.id = l.account_id
+       WHERE l.id = ? AND l.user_id = ?`,
+      [req.params.id, req.userId]
+    );
     if (loans.length === 0) return res.status(404).json({ error: 'Loan not found.' });
-    const [repayments] = await pool.query('SELECT * FROM loan_repayments WHERE loan_id = ? ORDER BY repayment_date ASC', [req.params.id]);
+    const [repayments] = await pool.query(
+      `SELECT r.*, a.name AS account_name FROM loan_repayments r
+       LEFT JOIN bank_accounts a ON a.id = r.account_id
+       WHERE r.loan_id = ? ORDER BY r.repayment_date ASC`,
+      [req.params.id]
+    );
     res.json({ ...loans[0], repayments });
   } catch (err) {
     console.error(err);

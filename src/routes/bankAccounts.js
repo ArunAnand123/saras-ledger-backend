@@ -40,7 +40,16 @@ router.get('/', async (req, res) => {
       // a genuine historical fact, not "today" - but keep it separate from openingBalanceDate,
       // which stays null (not silently treated as confirmed) until the user actually saves it.
       const suggestedOpeningDate = openingBalanceDate ? null : (acct.created_at ? new Date(acct.created_at).toISOString().slice(0, 10) : null);
-      return { ...acct, currentBalance, openingBalanceDate, suggestedOpeningDate };
+      // opening_balance is normally a single shared value on bank_accounts, but that only ever
+      // correctly represents ONE ledger at a time - if this account has its own per-ledger entry
+      // (set when a ledger was created/switched to), use that instead, so each ledger keeps its
+      // own correct starting point even when switching back and forth between them.
+      const [ledgerOpening] = await pool.query(
+        'SELECT opening_balance FROM ledger_account_openings WHERE ledger_id = ? AND account_id = ?',
+        [req.ledgerId, acct.id]
+      );
+      const openingBalance = ledgerOpening.length > 0 ? Number(ledgerOpening[0].opening_balance) : Number(acct.opening_balance);
+      return { ...acct, opening_balance: openingBalance, currentBalance, openingBalanceDate, suggestedOpeningDate };
     }));
     res.json(withBalances);
   } catch (err) {
@@ -62,6 +71,11 @@ router.post('/', async (req, res) => {
       [req.userId, name, !!isCash, openingBalance || 0]
     );
     const accountId = result.insertId;
+
+    await conn.query(
+      'INSERT INTO ledger_account_openings (ledger_id, account_id, opening_balance) VALUES (?, ?, ?)',
+      [req.ledgerId, accountId, openingBalance || 0]
+    );
 
     let linkedTransactionId = null;
     if (openingBalance > 0 || openingBalanceDate) {
@@ -124,7 +138,11 @@ router.put('/:id', async (req, res) => {
       );
     }
 
-    await conn.query('UPDATE bank_accounts SET opening_balance = ? WHERE id = ?', [openingBalance || 0, acct.id]);
+    await conn.query(
+      `INSERT INTO ledger_account_openings (ledger_id, account_id, opening_balance) VALUES (?, ?, ?)
+       ON DUPLICATE KEY UPDATE opening_balance = VALUES(opening_balance)`,
+      [req.ledgerId, acct.id, openingBalance || 0]
+    );
     await conn.commit();
     res.json({ success: true });
   } catch (err) {

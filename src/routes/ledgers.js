@@ -52,7 +52,6 @@ async function computeAccountClosingBalance(conn, accountId, ledgerId) {
      FROM transactions WHERE account_id = ? AND ledger_id = ?`,
     [accountId, ledgerId]
   );
-  const [account] = await conn.query('SELECT opening_balance FROM bank_accounts WHERE id = ?', [accountId]);
   const [transfersOut] = await conn.query('SELECT COALESCE(SUM(amount),0) AS total FROM transfers WHERE from_account_id = ? AND ledger_id = ?', [accountId, ledgerId]);
   const [transfersIn] = await conn.query('SELECT COALESCE(SUM(amount),0) AS total FROM transfers WHERE to_account_id = ? AND ledger_id = ?', [accountId, ledgerId]);
 
@@ -64,7 +63,22 @@ async function computeAccountClosingBalance(conn, accountId, ledgerId) {
     'SELECT id FROM transactions WHERE account_id = ? AND ledger_id = ? AND is_opening_balance = TRUE LIMIT 1',
     [accountId, ledgerId]
   );
-  const opening = openingTxn.length > 0 ? 0 : (Number(account[0].opening_balance) || 0);
+  let opening = 0;
+  if (openingTxn.length === 0) {
+    // Use THIS ledger's own opening balance record if one exists, since the shared column on
+    // bank_accounts only ever correctly reflects one ledger at a time - falls back to it only
+    // for ledgers that pre-date this per-ledger tracking.
+    const [ledgerOpening] = await conn.query(
+      'SELECT opening_balance FROM ledger_account_openings WHERE ledger_id = ? AND account_id = ?',
+      [ledgerId, accountId]
+    );
+    if (ledgerOpening.length > 0) {
+      opening = Number(ledgerOpening[0].opening_balance) || 0;
+    } else {
+      const [account] = await conn.query('SELECT opening_balance FROM bank_accounts WHERE id = ?', [accountId]);
+      opening = Number(account[0].opening_balance) || 0;
+    }
+  }
   const income = Number(txns[0].income) || 0;
   const expense = Number(txns[0].expense) || 0;
   return opening + income - expense + Number(transfersIn[0].total) - Number(transfersOut[0].total);
@@ -116,9 +130,16 @@ router.post('/', async (req, res) => {
     );
     const newLedgerId = newLedgerResult.insertId;
 
-    // Carry forward: each account's opening_balance becomes its computed closing balance
+    // Carry forward: each account's opening balance for the NEW ledger becomes its computed
+    // closing balance from the ledger being closed - recorded per-ledger, so the OLD ledger's
+    // own opening balance (and every other past ledger's) stays untouched and independently
+    // correct if the user ever switches back into it.
     for (const acct of accounts) {
-      await conn.query('UPDATE bank_accounts SET opening_balance = ? WHERE id = ?', [closingBalances[acct.id], acct.id]);
+      await conn.query(
+        `INSERT INTO ledger_account_openings (ledger_id, account_id, opening_balance) VALUES (?, ?, ?)
+         ON DUPLICATE KEY UPDATE opening_balance = VALUES(opening_balance)`,
+        [newLedgerId, acct.id, closingBalances[acct.id]]
+      );
     }
 
     // Carry forward: only pending loans move to the new ledger; settled ones stay archived in the old one
@@ -162,6 +183,33 @@ router.post('/', async (req, res) => {
     await conn.rollback();
     console.error(err);
     res.status(500).json({ error: 'Could not create new ledger.' });
+  } finally {
+    conn.release();
+  }
+});
+
+// POST /api/ledgers/:id/switch - make a different ledger (past or current) the active one.
+// Unlike creating a new ledger, this does NOT close/archive anything, compute closing balances,
+// or move any data - it only changes which ledger is active for future reads/writes, and can be
+// switched back and forth freely between any of the user's own ledgers at any time.
+router.post('/:id/switch', async (req, res) => {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [target] = await conn.query('SELECT * FROM ledgers WHERE id = ? AND user_id = ?', [req.params.id, req.userId]);
+    if (target.length === 0) {
+      await conn.rollback();
+      return res.status(404).json({ error: 'Ledger not found.' });
+    }
+    await conn.query('UPDATE ledgers SET is_active = FALSE WHERE user_id = ?', [req.userId]);
+    await conn.query('UPDATE ledgers SET is_active = TRUE WHERE id = ?', [req.params.id]);
+    await conn.commit();
+    const token = jwt.sign({ userId: req.userId, ledgerId: Number(req.params.id) }, process.env.JWT_SECRET, { expiresIn: '30d' });
+    res.json({ token, ledgerId: Number(req.params.id), name: target[0].name });
+  } catch (err) {
+    await conn.rollback();
+    console.error(err);
+    res.status(500).json({ error: 'Could not switch ledger.' });
   } finally {
     conn.release();
   }

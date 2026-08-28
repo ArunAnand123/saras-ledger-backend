@@ -16,7 +16,11 @@ function normalizeDate(d) {
 // Shared helper: ensure a bank account exists for this user (matched by name, case-insensitive).
 // Returns its id. If it already exists, its opening_balance is left untouched unless updateOpening
 // is provided - imports should only override balances for a FULL backup, not a single month's data.
-async function ensureAccount(conn, userId, accountMap, name, isCash, openingBalance, updateOpening) {
+// For a genuinely NEW account with a positive opening balance, also creates the linked
+// is_opening_balance transaction (matching how the normal Add Bank Account screen does it) -
+// without this, the account has a starting number but no real transaction backing it, so
+// features like the opening-balance date have nothing to read.
+async function ensureAccount(conn, userId, accountMap, name, isCash, openingBalance, updateOpening, ledgerId, openingBalanceDate) {
   const key = (name || '').trim().toLowerCase();
   if (!key) return null;
   if (accountMap[key]) {
@@ -30,6 +34,19 @@ async function ensureAccount(conn, userId, accountMap, name, isCash, openingBala
     [userId, name, !!isCash, openingBalance || 0]
   );
   accountMap[key] = result.insertId;
+  if (ledgerId) {
+    await conn.query(
+      'INSERT INTO ledger_account_openings (ledger_id, account_id, opening_balance) VALUES (?, ?, ?)',
+      [ledgerId, result.insertId, openingBalance || 0]
+    );
+  }
+  if (openingBalance > 0 && ledgerId) {
+    await conn.query(
+      `INSERT INTO transactions (ledger_id, account_id, category, type, amount, txn_date, is_opening_balance)
+       VALUES (?, ?, ?, 'income', ?, ?, TRUE)`,
+      [ledgerId, result.insertId, `Opening balance - ${name}`, openingBalance, openingBalanceDate || new Date().toISOString().slice(0, 10)]
+    );
+  }
   return result.insertId;
 }
 
@@ -83,7 +100,7 @@ router.post('/full', async (req, res) => {
       // ledgers, so an account matched by name here could be one you've used for weeks with
       // its own real history. Only a genuinely new account (one that doesn't exist yet) gets
       // its opening balance set from the backup.
-      await ensureAccount(conn, req.userId, accountMap, acct.name, acct.isCash, acct.openingBalance, false);
+      await ensureAccount(conn, req.userId, accountMap, acct.name, acct.isCash, acct.openingBalance, false, newLedgerId, acct.openingBalanceDate);
     }
 
     const [existingCategories] = await conn.query('SELECT * FROM categories WHERE user_id = ?', [req.userId]);

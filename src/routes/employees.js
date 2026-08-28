@@ -35,15 +35,16 @@ router.get('/:id/history', async (req, res) => {
 
 // POST /api/employees - mirrors saveNewEmployee() create path
 router.post('/', async (req, res) => {
-  const { name, dateOfJoining, dateOfRelieving } = req.body;
+  const { name, dateOfJoining, dateOfRelieving, fixedSalary } = req.body;
   if (!name || !dateOfJoining) return res.status(400).json({ error: 'Name and Date of joining are both required.' });
   if (dateOfRelieving && new Date(dateOfRelieving) <= new Date(dateOfJoining)) {
     return res.status(400).json({ error: 'Date of relieving must be after Date of joining.' });
   }
   try {
+    const effectiveDate = fixedSalary ? new Date().toISOString().slice(0, 10) : null;
     const [result] = await pool.query(
-      'INSERT INTO employees (user_id, name, date_of_joining, date_of_relieving) VALUES (?, ?, ?, ?)',
-      [req.userId, name, dateOfJoining, dateOfRelieving || null]
+      'INSERT INTO employees (user_id, name, date_of_joining, date_of_relieving, fixed_salary, fixed_salary_effective_date) VALUES (?, ?, ?, ?, ?, ?)',
+      [req.userId, name, dateOfJoining, dateOfRelieving || null, fixedSalary || null, effectiveDate]
     );
     res.status(201).json({ id: result.insertId });
   } catch (err) {
@@ -54,15 +55,27 @@ router.post('/', async (req, res) => {
 
 // PUT /api/employees/:id - mirrors editEmployee() + saveNewEmployee() edit path
 router.put('/:id', async (req, res) => {
-  const { name, dateOfJoining, dateOfRelieving } = req.body;
+  const { name, dateOfJoining, dateOfRelieving, fixedSalary, fixedSalaryEffectiveDate } = req.body;
   if (!name || !dateOfJoining) return res.status(400).json({ error: 'Name and Date of joining are both required.' });
   if (dateOfRelieving && new Date(dateOfRelieving) <= new Date(dateOfJoining)) {
     return res.status(400).json({ error: 'Date of relieving must be after Date of joining.' });
   }
   try {
+    const [existing] = await pool.query('SELECT fixed_salary, fixed_salary_effective_date FROM employees WHERE id=? AND user_id=?', [req.params.id, req.userId]);
+    if (existing.length === 0) return res.status(404).json({ error: 'Employee not found.' });
+
+    const newSalary = fixedSalary || null;
+    const oldSalary = existing[0].fixed_salary !== null ? Number(existing[0].fixed_salary) : null;
+    // Only touch the effective date when the salary amount genuinely changed - editing the
+    // name or dates shouldn't silently reset "since when" the current rate has applied.
+    let effectiveDate = existing[0].fixed_salary_effective_date;
+    if (newSalary !== oldSalary) {
+      effectiveDate = newSalary ? (fixedSalaryEffectiveDate || new Date().toISOString().slice(0, 10)) : null;
+    }
+
     const [result] = await pool.query(
-      'UPDATE employees SET name=?, date_of_joining=?, date_of_relieving=? WHERE id=? AND user_id=?',
-      [name, dateOfJoining, dateOfRelieving || null, req.params.id, req.userId]
+      'UPDATE employees SET name=?, date_of_joining=?, date_of_relieving=?, fixed_salary=?, fixed_salary_effective_date=? WHERE id=? AND user_id=?',
+      [name, dateOfJoining, dateOfRelieving || null, newSalary, effectiveDate, req.params.id, req.userId]
     );
     if (result.affectedRows === 0) return res.status(404).json({ error: 'Employee not found.' });
     res.json({ success: true });

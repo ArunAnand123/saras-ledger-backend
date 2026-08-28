@@ -188,6 +188,24 @@ router.post('/', async (req, res) => {
   }
 });
 
+// PUT /api/ledgers/:id - rename a ledger (current or past, any of the user's own ledgers).
+router.put('/:id', async (req, res) => {
+  try {
+    const { name } = req.body;
+    const trimmed = (name || '').trim();
+    if (!trimmed) return res.status(400).json({ error: 'Please enter a name for this ledger.' });
+    const [existing] = await pool.query('SELECT id FROM ledgers WHERE id = ? AND user_id = ?', [req.params.id, req.userId]);
+    if (existing.length === 0) return res.status(404).json({ error: 'Ledger not found.' });
+    const [dup] = await pool.query('SELECT id FROM ledgers WHERE user_id = ? AND name = ? AND id != ?', [req.userId, trimmed, req.params.id]);
+    if (dup.length > 0) return res.status(400).json({ error: 'You already have a ledger with that name.' });
+    await pool.query('UPDATE ledgers SET name = ? WHERE id = ?', [trimmed, req.params.id]);
+    res.json({ success: true, name: trimmed });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Could not rename ledger.' });
+  }
+});
+
 // POST /api/ledgers/:id/switch - make a different ledger (past or current) the active one.
 // Unlike creating a new ledger, this does NOT close/archive anything, compute closing balances,
 // or move any data - it only changes which ledger is active for future reads/writes, and can be

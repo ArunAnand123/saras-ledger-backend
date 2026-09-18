@@ -44,7 +44,8 @@ function normalizeForMonth(forMonth) {
 
 // Mirrors validateAndSave(kind) for kind='income'/'expense'
 router.post('/', async (req, res) => {
-  const { accountId, category, subcategory, type, amount, date, forMonth, notes, billPhoto, createdAt } = req.body;
+console.log('RECEIVED BODY:', JSON.stringify(req.body));
+  const { accountId, category, subcategory, type, amount, date, forMonth, notes, billPhoto, createdAt, splitGroupId } = req.body;
 
   if (!amount || amount <= 0) {
     return res.status(400).json({ error: 'Amount is required and must be greater than zero.' });
@@ -56,13 +57,13 @@ router.post('/', async (req, res) => {
   try {
     const [result] = await pool.query(
       createdAt
-        ? `INSERT INTO transactions (ledger_id, account_id, category, subcategory, type, amount, txn_date, for_month, notes, bill_photo_url, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-        : `INSERT INTO transactions (ledger_id, account_id, category, subcategory, type, amount, txn_date, for_month, notes, bill_photo_url)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ? `INSERT INTO transactions (ledger_id, account_id, category, subcategory, type, amount, txn_date, for_month, notes, bill_photo_url, created_at, split_group_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        : `INSERT INTO transactions (ledger_id, account_id, category, subcategory, type, amount, txn_date, for_month, notes, bill_photo_url, split_group_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       createdAt
-        ? [req.ledgerId, accountId, category, subcategory || null, type, amount, date, normalizeForMonth(forMonth), notes || null, billPhoto || null, createdAt]
-        : [req.ledgerId, accountId, category, subcategory || null, type, amount, date, normalizeForMonth(forMonth), notes || null, billPhoto || null]
+        ? [req.ledgerId, accountId, category, subcategory || null, type, amount, date, normalizeForMonth(forMonth), notes || null, billPhoto || null, createdAt, splitGroupId || null]
+        : [req.ledgerId, accountId, category, subcategory || null, type, amount, date, normalizeForMonth(forMonth), notes || null, billPhoto || null, splitGroupId || null]
     );
     res.status(201).json({ id: result.insertId });
   } catch (err) {

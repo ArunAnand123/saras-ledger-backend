@@ -28,28 +28,10 @@ router.get('/', async (req, res) => {
         'SELECT COALESCE(SUM(amount),0) AS total FROM transfers WHERE to_account_id = ? AND ledger_id = ?',
         [acct.id, req.ledgerId]
       );
-      const [openingTxn] = await pool.query(
-        'SELECT txn_date FROM transactions WHERE account_id = ? AND is_opening_balance = TRUE LIMIT 1',
-        [acct.id]
-      );
       const income = Number(txns[0].income) || 0;
       const expense = Number(txns[0].expense) || 0;
       const currentBalance = income - expense + Number(transfersIn[0].total) - Number(transfersOut[0].total);
-      const openingBalanceDate = openingTxn.length > 0 ? openingTxn[0].txn_date : null;
-      // No confirmed date? Suggest the account's real creation timestamp as a starting point -
-      // a genuine historical fact, not "today" - but keep it separate from openingBalanceDate,
-      // which stays null (not silently treated as confirmed) until the user actually saves it.
-      const suggestedOpeningDate = openingBalanceDate ? null : (acct.created_at ? new Date(acct.created_at).toISOString().slice(0, 10) : null);
-      // opening_balance is normally a single shared value on bank_accounts, but that only ever
-      // correctly represents ONE ledger at a time - if this account has its own per-ledger entry
-      // (set when a ledger was created/switched to), use that instead, so each ledger keeps its
-      // own correct starting point even when switching back and forth between them.
-      const [ledgerOpening] = await pool.query(
-        'SELECT opening_balance FROM ledger_account_openings WHERE ledger_id = ? AND account_id = ?',
-        [req.ledgerId, acct.id]
-      );
-      const openingBalance = ledgerOpening.length > 0 ? Number(ledgerOpening[0].opening_balance) : Number(acct.opening_balance);
-      return { ...acct, opening_balance: openingBalance, currentBalance, openingBalanceDate, suggestedOpeningDate };
+      return { ...acct, currentBalance };
     }));
     res.json(withBalances);
   } catch (err) {
@@ -60,7 +42,7 @@ router.get('/', async (req, res) => {
 
 // POST /api/bank-accounts - add new account. If opening balance > 0, creates a real linked Income transaction.
 router.post('/', async (req, res) => {
-  const { name, openingBalance, isCash, openingBalanceDate } = req.body;
+  const { name, openingBalance, isCash } = req.body;
   if (!name) return res.status(400).json({ error: 'Bank name is required.' });
 
   const conn = await pool.getConnection();
@@ -72,17 +54,12 @@ router.post('/', async (req, res) => {
     );
     const accountId = result.insertId;
 
-    await conn.query(
-      'INSERT INTO ledger_account_openings (ledger_id, account_id, opening_balance) VALUES (?, ?, ?)',
-      [req.ledgerId, accountId, openingBalance || 0]
-    );
-
     let linkedTransactionId = null;
-    if (openingBalance > 0 || openingBalanceDate) {
+    if (openingBalance > 0) {
       const [txnResult] = await conn.query(
         `INSERT INTO transactions (ledger_id, account_id, category, type, amount, txn_date, is_opening_balance)
-         VALUES (?, ?, ?, 'income', ?, ?, TRUE)`,
-        [req.ledgerId, accountId, `Opening balance - ${name}`, openingBalance || 0, openingBalanceDate || new Date().toISOString().slice(0, 10)]
+         VALUES (?, ?, ?, 'income', ?, CURDATE(), TRUE)`,
+        [req.ledgerId, accountId, `Opening balance - ${name}`, openingBalance]
       );
       linkedTransactionId = txnResult.insertId;
     }
@@ -100,7 +77,7 @@ router.post('/', async (req, res) => {
 // PUT /api/bank-accounts/:id - edit opening balance (name is locked once created, matching the prototype's
 // safety decision - too many other computations reference accounts by name)
 router.put('/:id', async (req, res) => {
-  const { openingBalance, openingBalanceDate } = req.body;
+  const { openingBalance, name } = req.body;
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
@@ -114,6 +91,23 @@ router.put('/:id', async (req, res) => {
     }
     const acct = accounts[0];
 
+    if (name !== undefined) {
+      const trimmedName = name.trim();
+      if (!trimmedName) {
+        await conn.rollback();
+        return res.status(400).json({ error: 'Bank name cannot be empty.' });
+      }
+      const [dupes] = await conn.query(
+        'SELECT id FROM bank_accounts WHERE user_id = ? AND id != ? AND LOWER(name) = LOWER(?)',
+        [req.userId, acct.id, trimmedName]
+      );
+      if (dupes.length > 0) {
+        await conn.rollback();
+        return res.status(400).json({ error: 'You already have a bank account with this name.' });
+      }
+      await conn.query('UPDATE bank_accounts SET name = ? WHERE id = ?', [trimmedName, acct.id]);
+    }
+
     // Find existing linked opening-balance transaction, if any
     const [existingTxns] = await conn.query(
       'SELECT id FROM transactions WHERE account_id = ? AND is_opening_balance = TRUE LIMIT 1',
@@ -121,28 +115,20 @@ router.put('/:id', async (req, res) => {
     );
 
     if (existingTxns.length > 0) {
-      if (openingBalance > 0 || openingBalanceDate) {
-        if (openingBalanceDate) {
-          await conn.query('UPDATE transactions SET amount = ?, txn_date = ? WHERE id = ?', [openingBalance || 0, openingBalanceDate, existingTxns[0].id]);
-        } else {
-          await conn.query('UPDATE transactions SET amount = ? WHERE id = ?', [openingBalance || 0, existingTxns[0].id]);
-        }
+      if (openingBalance > 0) {
+        await conn.query('UPDATE transactions SET amount = ? WHERE id = ?', [openingBalance, existingTxns[0].id]);
       } else {
         await conn.query('DELETE FROM transactions WHERE id = ?', [existingTxns[0].id]);
       }
-    } else if (openingBalance > 0 || openingBalanceDate) {
+    } else if (openingBalance > 0) {
       await conn.query(
         `INSERT INTO transactions (ledger_id, account_id, category, type, amount, txn_date, is_opening_balance)
-         VALUES (?, ?, ?, 'income', ?, ?, TRUE)`,
-        [req.ledgerId, acct.id, `Opening balance - ${acct.name}`, openingBalance || 0, openingBalanceDate || new Date().toISOString().slice(0, 10)]
+         VALUES (?, ?, ?, 'income', ?, CURDATE(), TRUE)`,
+        [req.ledgerId, acct.id, `Opening balance - ${acct.name}`, openingBalance]
       );
     }
 
-    await conn.query(
-      `INSERT INTO ledger_account_openings (ledger_id, account_id, opening_balance) VALUES (?, ?, ?)
-       ON DUPLICATE KEY UPDATE opening_balance = VALUES(opening_balance)`,
-      [req.ledgerId, acct.id, openingBalance || 0]
-    );
+    await conn.query('UPDATE bank_accounts SET opening_balance = ? WHERE id = ?', [openingBalance || 0, acct.id]);
     await conn.commit();
     res.json({ success: true });
   } catch (err) {

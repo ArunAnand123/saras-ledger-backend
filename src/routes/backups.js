@@ -4,19 +4,16 @@ const requireAuth = require('../middleware/auth');
 
 const router = express.Router();
 
-const RETENTION_DAYS = 30;
-
-// Current wall-clock time in IST as a plain 'YYYY-MM-DD HH:MM:SS' string (optionally shifted
-// by offsetMs). The backups table used to rely on the database's own DEFAULT CURRENT_TIMESTAMP,
+// Current wall-clock time in IST as a plain 'YYYY-MM-DD HH:MM:SS' string. The backups table used to rely on the database's own DEFAULT CURRENT_TIMESTAMP,
 // but a managed database like Aiven runs its clock in UTC - so a backup taken at 11:59 PM IST
 // was stored as 18:29 and shown in the app 5.5 hours early. Writing the IST time from here
 // means the stored value is what the user's own clock said, whatever timezone the database
 // or this server happens to be in (same reason the app sends its own createdAt for transactions).
-function istNowString(offsetMs) {
+function istNowString() {
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23'
-  }).formatToParts(new Date(Date.now() + (offsetMs || 0)));
+  }).formatToParts(new Date());
   const p = {};
   parts.forEach(x => { p[x.type] = x.value; });
   const hour = p.hour === '24' ? '00' : p.hour;
@@ -104,21 +101,30 @@ async function buildBackupData(userId) {
   };
 }
 
-// Deletes this user's backups older than the retention window. Called after every
-// successful backup (scheduled or manual) so the table doesn't grow unbounded.
-async function pruneOldBackups(userId) {
-  await pool.query(
-    'DELETE FROM backups WHERE user_id = ? AND created_at < ?',
-    [userId, istNowString(-RETENTION_DAYS * 24 * 60 * 60 * 1000)]
-  );
+// Only the most recent backup is kept per user - every earlier one is deleted. This runs only
+// AFTER the new backup has been saved successfully, so a failed backup attempt can never leave
+// the user with no backup at all. It deletes only backups OLDER than the one just saved (lower
+// id), never "everything except mine": if two backups overlap (a nightly run and a manual tap,
+// say), each one then only ever removes older rows, so the newest can never be deleted by anyone.
+async function pruneOldBackups(userId, newestId) {
+  await pool.query('DELETE FROM backups WHERE user_id = ? AND id < ?', [userId, newestId]);
 }
 
-// Generates and stores one backup for a single user. Shared by the cron job and the
-// manual endpoint below.
+// Generates and stores one backup for a single user, replacing their previous one. Shared by
+// the nightly job and the manual "Back up now" endpoint below.
 async function runBackupForUser(userId) {
   const data = await buildBackupData(userId);
-  await pool.query('INSERT INTO backups (user_id, data, created_at) VALUES (?, ?, ?)', [userId, JSON.stringify(data), istNowString()]);
-  await pruneOldBackups(userId);
+  const [result] = await pool.query(
+    'INSERT INTO backups (user_id, data, created_at) VALUES (?, ?, ?)',
+    [userId, JSON.stringify(data), istNowString()]
+  );
+  try {
+    await pruneOldBackups(userId, result.insertId);
+  } catch (err) {
+    // The new backup is already safely saved - failing to tidy up the old one shouldn't make
+    // the whole backup look like it failed. The next backup's cleanup will catch it.
+    console.error(`Could not remove old backups for user ${userId}:`, err);
+  }
 }
 
 // Runs the nightly backup for every user in the system. Called by the cron schedule

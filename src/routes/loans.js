@@ -107,7 +107,7 @@ router.put('/:id', async (req, res) => {
     if (loan.linked_transaction_id) {
       await conn.query(
         'UPDATE transactions SET category=?, amount=?, txn_date=?, account_id=? WHERE id=?',
-        [`Loan borrowed from ${borrowedFrom}`, amount, date, accountId, loan.linked_transaction_id]
+        [(loan.direction === 'lent' ? 'Loan given to ' : 'Loan borrowed from ') + borrowedFrom, amount, date, accountId, loan.linked_transaction_id]
       );
     }
     await conn.commit();
@@ -171,10 +171,12 @@ router.post('/:id/repayments', async (req, res) => {
       return res.status(400).json({ error: `This would exceed the borrowed amount (₹${loan.amount}). Pending is ₹${loan.amount - alreadyReturned}.` });
     }
 
+    // Money lent out (a hand loan) comes back as income; a loan taken is repaid as an expense.
+    const lent = loan.direction === 'lent';
     const [txnResult] = await conn.query(
       `INSERT INTO transactions (ledger_id, account_id, category, type, amount, txn_date, linked_loan_repayment_id)
-       VALUES (?, ?, ?, 'expense', ?, ?, NULL)`,
-      [req.ledgerId, accountId, `Loan repayment to ${loan.borrowed_from}`, amount, date]
+       VALUES (?, ?, ?, ?, ?, ?, NULL)`,
+      [req.ledgerId, accountId, lent ? `Loan returned by ${loan.borrowed_from}` : `Loan repayment to ${loan.borrowed_from}`, lent ? 'income' : 'expense', amount, date]
     );
     const [repaymentResult] = await conn.query(
       'INSERT INTO loan_repayments (loan_id, repayment_date, amount, account_id, linked_transaction_id) VALUES (?, ?, ?, ?, ?)',

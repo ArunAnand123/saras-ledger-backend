@@ -117,9 +117,12 @@ router.delete('/:employeeId/history/:historyId', async (req, res) => {
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
+    // Only the owner of the employee may delete one of their salary entries.
     const [record] = await conn.query(
-      'SELECT * FROM salary_history WHERE id = ? AND employee_id = ?',
-      [req.params.historyId, req.params.employeeId]
+      `SELECT h.* FROM salary_history h
+         JOIN employees e ON e.id = h.employee_id
+        WHERE h.id = ? AND h.employee_id = ? AND e.user_id = ?`,
+      [req.params.historyId, req.params.employeeId, req.userId]
     );
     if (record.length === 0) {
       await conn.rollback();

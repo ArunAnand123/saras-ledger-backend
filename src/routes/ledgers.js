@@ -43,6 +43,17 @@ router.get('/', async (req, res) => {
   }
 });
 
+// The opening balance an account has in one ledger: the amount of that ledger's own "opening balance" entry if it has one,
+// else that ledger's own opening record, else (only for a ledger from before per-ledger records) the value stored on the account.
+async function effectiveOpening(conn, accountId, ledgerId) {
+  const [openingTxn] = await conn.query('SELECT amount FROM transactions WHERE account_id = ? AND ledger_id = ? AND is_opening_balance = TRUE LIMIT 1', [accountId, ledgerId]);
+  if (openingTxn.length > 0) return Number(openingTxn[0].amount) || 0;
+  const [ledgerOpening] = await conn.query('SELECT opening_balance FROM ledger_account_openings WHERE ledger_id = ? AND account_id = ?', [ledgerId, accountId]);
+  if (ledgerOpening.length > 0) return Number(ledgerOpening[0].opening_balance) || 0;
+  const [account] = await conn.query('SELECT opening_balance FROM bank_accounts WHERE id = ?', [accountId]);
+  return Number(account[0].opening_balance) || 0;
+}
+
 // Helper: compute current closing balance for one account, within one ledger
 async function computeAccountClosingBalance(conn, accountId, ledgerId) {
   const [txns] = await conn.query(
@@ -84,16 +95,15 @@ async function computeAccountClosingBalance(conn, accountId, ledgerId) {
   return opening + income - expense + Number(transfersIn[0].total) - Number(transfersOut[0].total);
 }
 
-// POST /api/ledgers - create a new ledger, carrying forward per the confirmed table:
-//   Bank/Cash closing balances -> new opening balances     : YES
-//   Employees (record itself)                              : YES (untouched, tied to user_id)
-//   Categories                                              : YES (untouched, tied to user_id)
-//   Bank accounts (the accounts themselves)                 : YES (untouched, tied to user_id)
-//   Pending loans (from the ledger being closed)            : YES (moved to new ledger_id, automatic)
-//   Pending loans from OTHER, older past ledgers            : only if explicitly selected via sourceLedgerIds
-//   Settled loans, Transactions, Transfers, Salary history  : NO  (archived, new ledger starts clean)
+// POST /api/ledgers - close the current ledger and start a NEW ledger that is completely fresh:
+//   Bank/Cash balances                                      : NO  (every account starts at 0 in the new ledger)
+//   Pending loans                                           : NO  (they stay in the ledger they were made in)
+//   Employee salary balances                                : NO  (each ledger counts only its own payments, from when it started)
+//   Transactions, Transfers, Salary history, settled loans  : NO  (archived with the old ledger)
+//   Employees, Categories, Bank accounts (the names)        : YES (set-up data, tied to the login and not to a ledger)
+// The old ledger is archived with its final closing balances, and its own opening balances are frozen so it stays correct on its own.
 router.post('/', async (req, res) => {
-  const { name, sourceLedgerIds } = req.body;
+  const { name } = req.body;
   if (!name) return res.status(400).json({ error: 'Please name your new ledger.' });
 
   const conn = await pool.getConnection();
@@ -108,6 +118,12 @@ router.post('/', async (req, res) => {
     const oldLedger = oldLedgers[0];
 
     const [accounts] = await conn.query('SELECT * FROM bank_accounts WHERE user_id = ?', [req.userId]);
+
+    // Freeze the old ledger's own opening balances first, so nothing done later in another ledger can change them.
+    for (const acct of accounts) {
+      const opening = await effectiveOpening(conn, acct.id, oldLedger.id);
+      await conn.query('INSERT IGNORE INTO ledger_account_openings (ledger_id, account_id, opening_balance) VALUES (?, ?, ?)', [oldLedger.id, acct.id, opening]);
+    }
 
     // Compute closing balance per account for the ledger being closed
     const closingBalances = {};
@@ -130,46 +146,15 @@ router.post('/', async (req, res) => {
     );
     const newLedgerId = newLedgerResult.insertId;
 
-    // Carry forward: each account's opening balance for the NEW ledger becomes its computed
-    // closing balance from the ledger being closed - recorded per-ledger, so the OLD ledger's
-    // own opening balance (and every other past ledger's) stays untouched and independently
-    // correct if the user ever switches back into it.
+    // Nothing is carried forward: every account starts this ledger at 0, recorded for this ledger only.
     for (const acct of accounts) {
       await conn.query(
-        `INSERT INTO ledger_account_openings (ledger_id, account_id, opening_balance) VALUES (?, ?, ?)
-         ON DUPLICATE KEY UPDATE opening_balance = VALUES(opening_balance)`,
-        [newLedgerId, acct.id, closingBalances[acct.id]]
+        `INSERT INTO ledger_account_openings (ledger_id, account_id, opening_balance) VALUES (?, ?, 0)
+         ON DUPLICATE KEY UPDATE opening_balance = 0`,
+        [newLedgerId, acct.id]
       );
     }
-
-    // Carry forward: only pending loans move to the new ledger; settled ones stay archived in the old one
-    let sweptLoanCount = 0;
-    async function sweepPendingLoans(fromLedgerId) {
-      const [loans] = await conn.query('SELECT * FROM loans WHERE user_id = ? AND ledger_id = ?', [req.userId, fromLedgerId]);
-      for (const loan of loans) {
-        const [repayments] = await conn.query('SELECT COALESCE(SUM(amount),0) AS total FROM loan_repayments WHERE loan_id = ?', [loan.id]);
-        const pending = Number(loan.amount) - Number(repayments[0].total);
-        if (pending > 0) {
-          await conn.query('UPDATE loans SET ledger_id = ? WHERE id = ?', [newLedgerId, loan.id]);
-          sweptLoanCount++;
-        }
-      }
-    }
-    await sweepPendingLoans(oldLedger.id);
-
-    // Additionally, sweep in pending loans from any explicitly-selected OLDER past ledgers -
-    // these wouldn't move automatically otherwise, since only the ledger being closed does.
-    if (Array.isArray(sourceLedgerIds)) {
-      for (const srcId of sourceLedgerIds) {
-        if (Number(srcId) === oldLedger.id) continue; // already handled above
-        const [ownedCheck] = await conn.query('SELECT id FROM ledgers WHERE id = ? AND user_id = ?', [srcId, req.userId]);
-        if (ownedCheck.length === 0) continue; // ignore anything not actually owned by this user
-        await sweepPendingLoans(srcId);
-      }
-    }
-
-    // Employees, Categories, Bank accounts themselves: already carry forward automatically,
-    // since none of them are scoped by ledger_id in the schema - nothing to do here.
+    const sweptLoanCount = 0;   // pending loans are not moved: they stay in the ledger they were made in
 
     await conn.commit();
     const token = jwt.sign({ userId: req.userId, ledgerId: newLedgerId }, process.env.JWT_SECRET, { expiresIn: '30d' });

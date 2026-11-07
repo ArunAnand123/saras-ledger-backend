@@ -9,8 +9,8 @@ router.use(requireAuth);
 router.get('/', async (req, res) => {
   const { from, to } = req.query;
   try {
-    let sql = 'SELECT * FROM loans WHERE user_id = ?';
-    const params = [req.userId];
+    let sql = 'SELECT * FROM loans WHERE user_id = ? AND ledger_id = ?';   // each ledger lists only its own loans
+    const params = [req.userId, req.ledgerId];
     if (from) { sql += ' AND txn_date >= ?'; params.push(from); }
     if (to) { sql += ' AND txn_date <= ?'; params.push(to); }
     sql += ' ORDER BY txn_date DESC';

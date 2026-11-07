@@ -31,7 +31,12 @@ router.get('/', async (req, res) => {
       const income = Number(txns[0].income) || 0;
       const expense = Number(txns[0].expense) || 0;
       const currentBalance = income - expense + Number(transfersIn[0].total) - Number(transfersOut[0].total);
-      return { ...acct, currentBalance };
+      // The opening balance in THIS ledger: the amount of its own "opening balance" entry, else its own opening record
+      // (0 for a ledger that started fresh), else the value stored on the account (a ledger from before per-ledger records).
+      const [openTxn] = await pool.query('SELECT amount FROM transactions WHERE account_id = ? AND ledger_id = ? AND is_opening_balance = TRUE LIMIT 1', [acct.id, req.ledgerId]);
+      const [openRec] = await pool.query('SELECT opening_balance FROM ledger_account_openings WHERE account_id = ? AND ledger_id = ?', [acct.id, req.ledgerId]);
+      const opening = openTxn.length ? Number(openTxn[0].amount) : (openRec.length ? Number(openRec[0].opening_balance) : Number(acct.opening_balance));
+      return { ...acct, opening_balance: opening, currentBalance };
     }));
     res.json(withBalances);
   } catch (err) {
@@ -53,6 +58,11 @@ router.post('/', async (req, res) => {
       [req.userId, name, !!isCash, openingBalance || 0]
     );
     const accountId = result.insertId;
+    // The account did not exist in the other ledgers: it starts at 0 there, so the opening balance below belongs to this ledger only.
+    await conn.query(
+      'INSERT IGNORE INTO ledger_account_openings (ledger_id, account_id, opening_balance) SELECT id, ?, 0 FROM ledgers WHERE user_id = ? AND id <> ?',
+      [accountId, req.userId, req.ledgerId]
+    );
 
     let linkedTransactionId = null;
     if (openingBalance > 0) {
@@ -110,8 +120,8 @@ router.put('/:id', async (req, res) => {
 
     // Find existing linked opening-balance transaction, if any
     const [existingTxns] = await conn.query(
-      'SELECT id FROM transactions WHERE account_id = ? AND is_opening_balance = TRUE LIMIT 1',
-      [acct.id]
+      'SELECT id FROM transactions WHERE account_id = ? AND ledger_id = ? AND is_opening_balance = TRUE LIMIT 1',    // this ledger's only, never another ledger's
+      [acct.id, req.ledgerId]
     );
 
     if (existingTxns.length > 0) {

@@ -178,7 +178,23 @@ router.get('/:id/payments', async (req, res) => {
         ORDER BY t.txn_date, p.id`, [emp.id]);
     const [lop] = await pool.query('SELECT lop_date FROM employee_lop_dates WHERE employee_id = ? ORDER BY lop_date', [emp.id]);
     const [ts] = await pool.query('SELECT track_from FROM employee_track_start WHERE employee_id = ?', [emp.id]);
+    // The window of THIS ledger, so each ledger counts only its own salary. A ledger that follows an earlier one starts counting
+    // from when it started (its creation date, or its first entry if that is earlier); a closed ledger stops counting where it closed.
+    let ledgerStart = null, ledgerEnd = null;
+    const [ledRows] = await pool.query('SELECT id, created_at, closed_at FROM ledgers WHERE id = ? AND user_id = ?', [req.ledgerId, req.userId]);
+    const led = ledRows[0];
+    if (led) {
+      const istDay = (v) => { if (!v) return null; const d = (v instanceof Date) ? v : new Date(String(v).replace(' ', 'T') + 'Z'); return isNaN(d) ? null : new Date(d.getTime() + 5.5 * 3600 * 1000).toISOString().slice(0, 10); };
+      const [earlierRows] = await pool.query('SELECT COUNT(*) AS n FROM ledgers WHERE user_id = ? AND id < ?', [req.userId, led.id]);
+      if (earlierRows[0].n > 0) {
+        const [firstRows] = await pool.query('SELECT MIN(txn_date) AS d FROM transactions WHERE ledger_id = ?', [led.id]);
+        const c = istDay(led.created_at), f = firstRows[0] && firstRows[0].d ? ymd(firstRows[0].d) : null;
+        ledgerStart = (c && f) ? (f < c ? f : c) : (c || f);
+      }
+      ledgerEnd = istDay(led.closed_at);
+    }
     res.json({
+      ledgerStart, ledgerEnd,
       payments: pay.map(r => ({
         id: r.id, amount: Number(r.amount), payment_date: ymd(r.txn_date), notes: r.notes,
         employee_bank_name: r.employee_bank_name, linked_transaction_id: r.linked_transaction_id,

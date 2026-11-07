@@ -34,6 +34,20 @@ router.get('/', async (req, res) => {
   }
 });
 
+// Checks one entry before it is saved, so a wrong amount, type, date or somebody else's account can never be stored.
+// Returns { error } or { entry } with the amount rounded to whole paise.
+async function checkEntry(e, userId, needType) {
+  const amount = Number(e && e.amount);
+  if (!Number.isFinite(amount) || amount <= 0) return { error: 'Amount is required and must be greater than zero.' };
+  if (amount > 99999999.99) return { error: 'That amount is too large.' };
+  if (!e.accountId || !e.category || (needType && !e.type) || !e.date) return { error: 'Account, category, type, and date are all required.' };
+  if (needType && e.type !== 'income' && e.type !== 'expense') return { error: 'Type must be income or expense.' };
+  if (!/^\d{4}-\d{2}-\d{2}/.test(String(e.date))) return { error: 'The date is not valid.' };
+  const [acct] = await pool.query('SELECT id FROM bank_accounts WHERE id = ? AND user_id = ?', [e.accountId, userId]);
+  if (acct.length === 0) return { error: 'That payment method was not found.' };
+  return { entry: { ...e, amount: Math.round(amount * 100) / 100 } };
+}
+
 // POST /api/transactions - create a new income/expense entry
 function normalizeForMonth(forMonth) {
   if (!forMonth) return null;
@@ -44,17 +58,12 @@ function normalizeForMonth(forMonth) {
 
 // Mirrors validateAndSave(kind) for kind='income'/'expense'
 router.post('/', async (req, res) => {
-console.log('RECEIVED BODY:', JSON.stringify(req.body));
   const { accountId, category, subcategory, type, amount, date, forMonth, notes, billPhoto, createdAt, splitGroupId } = req.body;
 
-  if (!amount || amount <= 0) {
-    return res.status(400).json({ error: 'Amount is required and must be greater than zero.' });
-  }
-  if (!accountId || !category || !type || !date) {
-    return res.status(400).json({ error: 'Account, category, type, and date are all required.' });
-  }
-
   try {
+    const chk = await checkEntry(req.body, req.userId, true);
+    if (chk.error) return res.status(400).json({ error: chk.error });
+    const amount = chk.entry.amount;
     const [result] = await pool.query(
       createdAt
         ? `INSERT INTO transactions (ledger_id, account_id, category, subcategory, type, amount, txn_date, for_month, notes, bill_photo_url, created_at, split_group_id)
@@ -72,16 +81,48 @@ console.log('RECEIVED BODY:', JSON.stringify(req.body));
   }
 });
 
+// POST /api/transactions/batch - save several entries together (the parts of a Split): all of them, or none.
+router.post('/batch', async (req, res) => {
+  const list = req.body && req.body.entries;
+  if (!Array.isArray(list) || list.length === 0 || list.length > 50) return res.status(400).json({ error: 'Send between 1 and 50 entries.' });
+  const conn = await pool.getConnection();
+  try {
+    const clean = [];
+    for (let i = 0; i < list.length; i++) {
+      const chk = await checkEntry(list[i], req.userId, true);
+      if (chk.error) return res.status(400).json({ error: 'Entry ' + (i + 1) + ': ' + chk.error });
+      clean.push(chk.entry);
+    }
+    await conn.beginTransaction();
+    const ids = [];
+    for (const e of clean) {
+      const [r] = await conn.query(
+        `INSERT INTO transactions (ledger_id, account_id, category, subcategory, type, amount, txn_date, for_month, notes, bill_photo_url, created_at, split_group_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), ?)`,
+        [req.ledgerId, e.accountId, e.category, e.subcategory || null, e.type, e.amount, e.date, normalizeForMonth(e.forMonth), e.notes || null, e.billPhoto || null, e.createdAt || null, e.splitGroupId || null]
+      );
+      ids.push(r.insertId);
+    }
+    await conn.commit();
+    res.status(201).json({ ids });
+  } catch (err) {
+    await conn.rollback();
+    console.error(err);
+    res.status(500).json({ error: 'Could not save the entries. Nothing was saved.' });
+  } finally {
+    conn.release();
+  }
+});
+
 // PUT /api/transactions/:id - edit an existing entry
 // Mirrors editIncomeExpense() + the edit-mode branch of validateAndSave()
 router.put('/:id', async (req, res) => {
-  const { accountId, category, subcategory, amount, date, forMonth, notes, billPhoto, createdAt } = req.body;
-
-  if (!amount || amount <= 0) {
-    return res.status(400).json({ error: 'Amount is required and must be greater than zero.' });
-  }
+  const { accountId, category, subcategory, date, forMonth, notes, billPhoto, createdAt } = req.body;
 
   try {
+    const chk = await checkEntry(req.body, req.userId, false);
+    if (chk.error) return res.status(400).json({ error: chk.error });
+    const amount = chk.entry.amount;
     const [existing] = await pool.query(
       'SELECT id, bill_photo_url, created_at FROM transactions WHERE id = ? AND ledger_id = ?',
       [req.params.id, req.ledgerId]

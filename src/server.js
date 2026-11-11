@@ -16,6 +16,7 @@ const importRoutes = require('./routes/import');
 const dbUsageRoutes = require('./routes/dbUsage');
 const hiddenSubcategoryRoutes = require('./routes/hiddenSubcategories');
 const backupRoutes = require('./routes/backups');
+const salesRoutes = require('./routes/sales');
 
 const app = express();
 app.use(cors());
@@ -37,6 +38,7 @@ app.use('/api/import', importRoutes);
 app.use('/api/db-usage', dbUsageRoutes);
 app.use('/api/hidden-subcategories', hiddenSubcategoryRoutes);
 app.use('/api/backups', backupRoutes);
+app.use('/api/sales', salesRoutes);
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
